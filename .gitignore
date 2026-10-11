@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Prerequisites
 *.d
 
@@ -23,6 +24,20 @@
 *.dll
 *.so.*
 
+build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.out
+*.so
+*.a
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+.vs/
 # Fortran module files
 *.mod
 *.smod
@@ -66,3 +81,18 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+=======
+build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.out
+*.so
+*.a
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+>>>>>>> eeedc5e (Создание проекта и коммит через Linux)
