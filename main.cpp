@@ -7,6 +7,9 @@
 #include <netinet/in.h>
 #include <cstring>
 #include <iostream>
+#include <csignal>
+#include <cerrno>
+#include <cstdio>
 
 class SocketHandle {
 private:
@@ -71,18 +74,77 @@ SocketHandle create_listener(uint16_t port){
 	return sock;
 }
 
-void server_echo(SocketHandle client){
-	char buf[1025];
-	ssize_t n;
-	while((n = recv(client.get(), buf, sizeof(buf), 0)) > 0)
+class LineReader {
+private:
+	int fd_;
+	std::string buf_;
+	static constexpr size_t maxLine = 64 * 1024;
+
+public:
+	explicit LineReader(int fd) : fd_(fd), buf_("") {}
+
+	bool read_line(std::string& line){
+		char tmp[4096];
+		while (true)
+		{
+			size_t pos = buf_.find('\n');
+
+			if (pos != std::string::npos)
+			{
+				line = buf_.substr(0, pos);
+				buf_.erase(0, pos + 1);
+
+				if (!line.empty() && line.back() == '\r')
+					line.pop_back();
+
+				return true;
+			}
+
+			if (buf_.size() > maxLine)
+				return false;
+
+			ssize_t n = recv(fd_, tmp, sizeof(tmp), 0);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0)
+				return false;
+
+			buf_.append(tmp, n);
+		}
+	}
+};
+
+bool send_all(int fd, const std::string& data){
+	size_t sent = 0;
+
+	while (sent < data.size())
 	{
-		buf[n - 1] = '!';
-		buf[n] = '\n';
-		send(client.get(), buf, n + 1, 0);
+		ssize_t n = send(fd, data.data() + sent, data.size() - sent, 0);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return false;
+
+		sent += n;
+	}
+
+	return true;
+}
+
+void handle_client(SocketHandle client){
+	LineReader reader(client.get());
+	std::string line;
+
+	while(reader.read_line(line))
+	{
+		if (!send_all(client.get(), line + "!\n"))
+			break;
 	}
 }
 
 int main(){
+	signal(SIGPIPE, SIG_IGN);
+
 	try
 	{
 		auto listener = create_listener(8080);
@@ -97,7 +159,7 @@ int main(){
 				continue;
 			}
 
-			server_echo(SocketHandle(fd));
+			handle_client(SocketHandle(fd));
 		}
 	} catch(const std::exception& e)
 	{
