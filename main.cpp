@@ -202,7 +202,7 @@
 			std::getline(iss >> std::ws, value);
 			if (value.empty())
 				return "ERR wrong number of arguments";
-			store.set(key, value);
+			store.set(key, std::move(value));
 
 			return "OK";
 		}
@@ -219,7 +219,7 @@
 			if (!tmp)
 				return "NOT_FOUND";
 
-			return *store.get(key);
+			return *tmp;
 		}
 		else if (cmd == "DEL")
 		{
