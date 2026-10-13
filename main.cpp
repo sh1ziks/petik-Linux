@@ -17,6 +17,10 @@
 	#include <cassert>
 	#include <vector>
 	#include <thread>
+	#include <queue>
+	#include <functional>
+	#include <condition_variable>
+	#include <memory>
 
 
 	class SocketHandle {
@@ -139,17 +143,6 @@
 		return true;
 	}
 
-	void handle_client(SocketHandle client){
-		LineReader reader(client.get());
-		std::string line;
-
-		while(reader.read_line(line))
-		{
-			if (!send_all(client.get(), line + "!\n"))
-				break;
-		}
-	}
-
 	class  KVStore{
 	private:
 		std::unordered_map<std::string, std::string> data_;
@@ -239,55 +232,102 @@
 		return "ERR unknown command";
 	}
 
+	void handle_client(SocketHandle client, KVStore& store){
+		LineReader reader(client.get());
+		std::string line;
+
+		while(reader.read_line(line))
+		{
+			std::string reply = handle_command(store, line) + "\n";
+			if (!send_all(client.get(), reply))
+				break;
+		}
+	}
+
+
+	class ThreadPool{
+	private:
+		std::vector<std::thread> workers_;
+		std::queue<std::function<void()>> tasks_;
+		std::mutex m_;
+		std::condition_variable cv_;
+		bool stop_ = false;
+
+	public:
+		explicit ThreadPool(size_t n){
+			for (size_t i = 0; i < n; i++)
+				workers_.emplace_back([this]{
+					while(true)
+					{
+						std::function<void()> task;
+						{
+							std::unique_lock<std::mutex> lock(m_);
+							cv_.wait(lock, [this] {return stop_ || !tasks_.empty();});
+
+							if (stop_ && tasks_.empty())
+								return;
+							task = std::move(tasks_.front());
+							tasks_.pop();
+						}
+						try
+						{
+							task();
+						} catch (const std::exception& e)
+						{
+							std::cerr << "task failed: " << e.what() << "\n";
+						} catch (...)
+						{
+							std::cerr << "task failed: unknown error\n";
+						}
+					}
+				});
+		}
+
+		void enqueue (std::function<void()> f){
+			{
+				std::lock_guard<std::mutex> lock(m_);
+				tasks_.push(std::move(f));
+			}
+			cv_.notify_one();
+		}
+
+		~ThreadPool(){
+			{
+				std::lock_guard<std::mutex> lock(m_);
+				stop_ = true;
+			}
+			cv_.notify_all();
+			for (auto& w : workers_)
+				w.join();
+		}
+	};
+
 	int main(){
-		// signal(SIGPIPE, SIG_IGN);
-
-		// try
-		// {
-		// 	auto listener = create_listener(8080);
-			
-		// 	while (true)
-		// 	{
-		// 		int fd = ::accept(listener.get(), nullptr, nullptr);
-
-		// 		if (fd < 0)
-		// 		{
-		// 			perror("accept");
-		// 			continue;
-		// 		}
-
-		// 		handle_client(SocketHandle(fd));
-		// 	}
-		// } catch(const std::exception& e)
-		// {
-		// 	std::cerr <<"fatal: " << e.what() << "\n";
-		// 	return 1;
-		// }
-
+		signal(SIGPIPE, SIG_IGN);
 		KVStore store;
-		assert(handle_command(store, "SET a 1") == "OK");
-		assert(handle_command(store, "GET a") == "1");
-		assert(handle_command(store, "GET b") == "NOT_FOUND");
-		assert(handle_command(store, "DEL a") == "OK");
-		assert(handle_command(store, "DEL a") == "NOT_FOUND");
-		assert(handle_command(store, "FOO") == "ERR unknown command");
-		assert(handle_command(store, "SET onlykey") == "ERR wrong number of arguments");
-		assert(handle_command(store, "SET city New York") == "OK");
-		assert(handle_command(store, "GET city") == "New York");
-		assert(handle_command(store, "GET") == "ERR wrong number of arguments");
-		assert(handle_command(store, "GET a b") == "ERR wrong number of arguments");
-		assert(handle_command(store, "DEL") == "ERR wrong number of arguments");
-		assert(handle_command(store, "") == "ERR unknown command");
-		std::cout << "Single-threaded tests passed\n";
+		ThreadPool pool(4);
 
-		KVStore mstore;
-		std::vector<std::thread> threads;
-		for (int t = 0; t < 4; ++t)
-			threads.emplace_back([&mstore, t] {
-				for (int i = 0; i < 10000; ++i)
-					mstore.set("k" + std::to_string(t) + "_" + std::to_string(i), "v");
-			});
-		for (auto& th : threads) th.join();
-		assert(mstore.size() == 40000);
-		std::cout << "Multi-threaded test passed\n";
+		try
+		{
+			auto listener = create_listener(8080);
+			
+			while (true)
+			{
+				int fd = ::accept(listener.get(), nullptr, nullptr);
+
+				if (fd < 0)
+				{
+					perror("accept");
+					continue;
+				}
+
+				SocketHandle tmp(fd);
+				std::shared_ptr<SocketHandle> sock = std::make_shared<SocketHandle>(std::move(tmp));
+				pool.enqueue([sock, &store] {handle_client(std::move(*sock), store);});
+			}
+		} catch(const std::exception& e)
+		{
+			std::cerr <<"fatal: " << e.what() << "\n";
+			return 1;
+		}
 	}
