@@ -21,6 +21,8 @@
 	#include <functional>
 	#include <condition_variable>
 	#include <memory>
+	#include <atomic>
+	#include <sys/time.h>
 
 
 	class SocketHandle {
@@ -232,11 +234,13 @@
 		return "ERR unknown command";
 	}
 
+	std::atomic<bool> g_stop{false};
+
 	void handle_client(SocketHandle client, KVStore& store){
 		LineReader reader(client.get());
 		std::string line;
 
-		while(reader.read_line(line))
+		while(!g_stop && reader.read_line(line))
 		{
 			std::string reply = handle_command(store, line) + "\n";
 			if (!send_all(client.get(), reply))
@@ -302,26 +306,48 @@
 		}
 	};
 
+	void on_sigint(int){
+		g_stop = true;
+	}
+
 	int main(){
 		signal(SIGPIPE, SIG_IGN);
 		KVStore store;
 		ThreadPool pool(4);
 
+		struct sigaction sa{};
+		sa.sa_handler = on_sigint;
+		sigaction(SIGINT, &sa, nullptr);
+
 		try
 		{
 			auto listener = create_listener(8080);
 			
-			while (true)
+			while (!g_stop)
 			{
 				int fd = ::accept(listener.get(), nullptr, nullptr);
 
 				if (fd < 0)
 				{
+					if (errno == EINTR)
+					{
+						if (g_stop)
+							break;
+
+						continue;
+					}
+
 					perror("accept");
 					continue;
 				}
-
+				
 				SocketHandle tmp(fd);
+
+				timeval tv{};
+				tv.tv_sec = 10; // 10 секунд тишины — закрываем соединение
+				setsockopt(tmp.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+
 				std::shared_ptr<SocketHandle> sock = std::make_shared<SocketHandle>(std::move(tmp));
 				pool.enqueue([sock, &store] {handle_client(std::move(*sock), store);});
 			}
